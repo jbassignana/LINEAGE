@@ -2,6 +2,7 @@
 #define L2AUTH_LOGIN_HELPER_C
 
 #include <string.h>
+#include <login/helper.h>
 
 void login_helper_username_from_packet
 (
