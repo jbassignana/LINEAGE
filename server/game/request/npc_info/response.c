@@ -52,7 +52,7 @@ l2_packet* game_request_npc_info_response(struct GameClient* client)
         l2_string* title_as_string;
 
         strcat(title, "Gatekeeper");
-        strcat(name, "Roxxy");
+        strcat(name, "Nro");
 
         name_as_string_length = l2_string_calculate_space_from_char(strlen(name) + 1);
         name_as_string = game_client_alloc_temp_mem(client, name_as_string_length);
