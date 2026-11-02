@@ -33,3 +33,55 @@ credits
 todo
 - add stop timer flag to stop the timer thread
 - wclose should signal instead of just setting the variable
+
+----------------------------------------------------------------------
+fork changes (multithreaded server, fps-friendly, skills, wasd)
+----------------------------------------------------------------------
+
+threads
+- net thread (epoll/select) -> handlers under the world lock.
+- tick thread at 10Hz (CFG_TICK_MS, was 1 second).
+- sender pool: each connection has an outbox, packets produced in a tick
+  are flushed together and written to the socket outside the world lock,
+  so a slow client never stalls the rest.
+- job pool: visibility (who sees what) is computed for all players in
+  parallel.
+- threads stop cleanly before a hot reload and start again after it.
+
+why the client fps improves (the c4 client itself can't be changed)
+- interest management: a client only hears about objects within
+  CFG_VIEW_ENTER (3000) and never more than CFG_MAX_KNOWN (120, nearest
+  first, sticky). the original sent everything to everybody in the world.
+- no more ValidateLocation spam to moving players (the check was inverted).
+- keyboard moves from other players are throttled (CFG_KEYBOARD_BCAST_MS).
+- packets are batched per tick, TCP_NODELAY on.
+
+skills (gs_combat.c, data driven)
+- daggers (rogue/treasure hunter/scout/plains walker/assassin/abyss
+  walker...): Mortal Blow, Backstab (from behind only), Deadly Blow and
+  Shadow Step (821): teleports you behind the target, which can't turn
+  around nor attack for 1.2s. blows always land from behind.
+- dwarves: Power Strike, Stun Attack, Hammer Crush (stun), Wild Sweep
+  (area), Fatal Strike, Battle Roar; +20% hp, +18% p.atk, +12% p.def.
+- stats per race/class (the stored ones were placeholders: speed 20...).
+
+wasd / keyboard movement
+- server: echo to the mover immediately, throttle for observers, clamp the
+  lead point, trust the client within CFG_DESYNC_TOLERANCE (no rubber
+  band), correct beyond it (no speed/teleport hacks), detect key release.
+- client/ue5/L2KeyboardMover.h: prediction + minimal packets + blended
+  corrections for a custom ue5 client (example component included).
+
+fixes
+- crash (segfault in wqueue) with ~40 players; request buffer overflow;
+  packet size 0 infinite loop; u32 distance overflow; null character
+  dereference on early packets; path traversal through character names;
+  socket leak on linux; windows select limited to 64 sockets.
+
+tests (linux): bash tests/run_all.sh [tsan|asan]
+- smoke, wasd, mover (c++ mover vs server), fuzz, load, siege.
+
+not validated yet against a real c4 client: Shadow Step visuals (it's an
+interlude skill), the c4 MagicSkillUse/SkillList trailing bytes, and
+CharInfo for players (CFG_SEND_PLAYER_CHARINFO, off by default).
+the windows build was not compiled here (no msvc), only linux.

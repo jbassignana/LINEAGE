@@ -317,8 +317,13 @@ static void init_threads(struct state *state)
 
     l2_mutex_init(&state->lock);
     for (size_t i = 0; i < countof(state->connections); i++) {
-        l2_mutex_init(&state->connections[i].out_lock);
-        l2_mutex_init(&state->connections[i].io_lock);
+        struct connection *conn = state->connections + i;
+        l2_mutex_init(&conn->out_lock);
+        l2_mutex_init(&conn->io_lock);
+        // after a hot reload the senders' ready lists are gone: let the
+        // next flush schedule every connection again.
+        conn->queued = 0;
+        conn->retry_at_ms = 0;
     }
 
     // senders.
