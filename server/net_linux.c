@@ -182,8 +182,12 @@ unsigned long long net_send(int socket, void *buf, unsigned long long n)
         long long tmp = send(socket, (char *) buf + sent, n - sent, MSG_NOSIGNAL);
         if (tmp == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
             break;
+        if (tmp == -1 && errno == EINTR)
+            continue;
         if (tmp == -1) {
-            print_err("net_write");
+            // the peer went away; the listen loop will report the close.
+            if (errno != EPIPE && errno != ECONNRESET)
+                print_err("net_write");
             break;
         }
         sent += tmp;

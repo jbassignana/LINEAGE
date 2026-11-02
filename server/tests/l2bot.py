@@ -7,7 +7,8 @@ It skips the login server: it writes data/accounts/<user>/access.txt itself
 
 usage:
   python3 tests/l2bot.py smoke            # functional checks (one/two bots)
-  python3 tests/l2bot.py load N SECONDS   # N bots walking; prints bytes/packets per bot
+  python3 tests/l2bot.py load N SECONDS   # N bots, half in a blob, half spread over the map
+  python3 tests/l2bot.py siege N SECONDS  # N bots all in the same blob (mass pvp)
 """
 import asyncio, os, random, struct, sys, time, math, collections
 
@@ -76,6 +77,7 @@ class Bot:
         self.x = self.y = self.z = 0
         self.skills = []
         self.known = set()       # object ids the client was told about
+        self.movers = set()      # distinct objects this client got move/attack/cast packets for
         self.log = []
 
     async def connect(self):
@@ -93,9 +95,11 @@ class Bot:
                     body = self.dec.decrypt(body)
                 op = body[0]
                 self.packets[op] += 1
+                if op in (0x01, 0x60, 0x05, 0x48) and len(body) >= 5:
+                    self.movers.add(struct.unpack_from("<I", body, 1)[0])
                 self._observe(op, body)
                 await self.inbox.put((op, body))
-        except (asyncio.IncompleteReadError, ConnectionResetError):
+        except (asyncio.IncompleteReadError, OSError):
             await self.inbox.put((None, b""))
 
     def _observe(self, op, b):
@@ -270,7 +274,7 @@ async def smoke():
     return ok
 
 
-async def load(n, seconds):
+async def load(n, seconds, siege=False):
     bots = [Bot("load%04d_%d" % (i, random.randint(0, 9999)), race=random.choice([0, 4]),
                 cls=random.choice([0, 7, 53])) for i in range(n)]
     for bot in bots:
@@ -278,13 +282,13 @@ async def load(n, seconds):
     await asyncio.sleep(0.5)
     # half of the bots spread far away (other zones), half packed in a siege blob.
     for i, bot in enumerate(bots):
-        if i % 2:
+        if i % 2 and not siege:
             bot.teleport(bot.x + 8000 * (1 + i % 7), bot.y + 8000 * (i % 5), bot.z)
         else:
             bot.teleport(bot.x + random.randint(-400, 400), bot.y + random.randint(-400, 400), bot.z)
     await asyncio.sleep(0.5)
     for bot in bots:
-        bot.bytes_in = 0; bot.packets.clear()
+        bot.bytes_in = 0; bot.packets.clear(); bot.movers.clear()
     t0 = time.time()
 
     async def walk(bot):
@@ -303,15 +307,55 @@ async def load(n, seconds):
     pk = sum(sum(b.packets.values()) for b in bots) / len(bots) / el
     kbn = sum(b.bytes_in for b in near) / len(near) / el / 1024
     pkn = sum(sum(b.packets.values()) for b in near) / len(near) / el
-    print("bots=%d secs=%.1f  avg/bot: %.1f KB/s %.0f pkts/s   blob bot: %.1f KB/s %.0f pkts/s"
-          % (n, el, kb, pk, kbn, pkn))
+    movers = sum(len(b.movers) for b in near) / len(near)
+    churn = sum(b.packets[0x12] for b in near) / len(near) / el
+    print("bots=%d secs=%.1f  avg/bot: %.1f KB/s %.0f pkts/s   blob bot: %.1f KB/s %.0f pkts/s, %.0f distinct objects animated, %.1f despawns/s"
+          % (n, el, kb, pk, kbn, pkn, movers, churn))
     for b in bots:
         b.w.close()
 
 
-if __name__ == "__main__":
+def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "smoke"
+    if mode == "fuzz":
+        sys.exit(0 if asyncio.run(fuzz()) else 1)
     if mode == "smoke":
         sys.exit(0 if asyncio.run(smoke()) else 1)
     else:
-        asyncio.run(load(int(sys.argv[2]), float(sys.argv[3])))
+        asyncio.run(load(int(sys.argv[2]), float(sys.argv[3]), siege=(mode == "siege")))
+
+
+async def fuzz(rounds=200):
+    """garbage packets before/after entering the world: the server must survive."""
+    for r in range(rounds):
+        b = Bot("fuzz%05d" % r)
+        try:
+            if r % 2:
+                await b.login_and_enter()
+            else:
+                await b.connect()
+                b.send(b"\x00" + struct.pack("<I", 656))
+                b.encrypted = True
+            for _ in range(random.randint(1, 20)):
+                op = random.choice([0x01, 0x04, 0x0a, 0x2f, 0x36, 0x37, 0x3f, 0x48, 0x03, 0x0d, 0xcd, random.randint(0, 255)])
+                body = bytes([op]) + os.urandom(random.randint(0, 64))
+                b.send(body)
+            if r % 7 == 0:   # raw junk incl. size 0 / huge sizes
+                b.w.write(os.urandom(random.randint(1, 3000)))
+            await b.w.drain()
+            await asyncio.sleep(0.01)
+        except (ConnectionError, TimeoutError, OSError, asyncio.TimeoutError):
+            pass
+        try:
+            b.w.close()
+        except Exception:
+            pass
+    # the server must still accept and serve a normal player.
+    ok = Bot("fuzzcheck%d" % random.randint(0, 99999))
+    await ok.login_and_enter()
+    print("  PASS server alive after %d fuzz connections" % rounds)
+    return True
+
+
+if __name__ == "__main__":
+    main()

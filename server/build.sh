@@ -6,7 +6,7 @@
 set -e
 pushd bin > /dev/null
 
-flags="-Wall -Wextra -O2 -g"
+flags="-Wall -Wextra -O2 -g $EXTRA_FLAGS"
 case "$1" in
     test) flags="$flags -DL2_TEST_TELEPORT" ;;
     tsan) flags="-Wall -Wextra -O1 -g -DL2_TEST_TELEPORT -fsanitize=thread" ;;

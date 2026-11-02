@@ -118,9 +118,9 @@ struct connection {
     byte to_send[CFG_OUTBOX_BYTES];
     size_t to_send_count;
     int overflowed;
-    int queued;
+    int queued;          // already in its sender's ready list.
     u64 stat_bytes;
-    u64 stat_packets;          // already in its sender's ready list.
+    u64 stat_packets;
 
     u64 retry_at_ms;     // socket buffer was full, retry later.
     int io_socket;       // socket as seen by the sender (0 = closed).

@@ -64,8 +64,7 @@ int on_pevent(void **buf, enum pevent event, union ppayload *payload)
 static int on_init(void **buf)
 {
     assert(buf);
-    size_t to_alloc = 256 mb;
-    assert(to_alloc > sizeof(struct state));
+    size_t to_alloc = sizeof(struct state);
     *buf = calloc(1, to_alloc);
     if (!*buf) {
         trace("unable to allocate memory for game server" nl);
@@ -594,7 +593,7 @@ static byte *bscanf_va(byte *src, size_t n, va_list va)
              * bounded by both the destination and the packet.
              */
             size_t i = 0;
-            while (tail + 1 < end && *(u16 *) tail) {
+            while (tail + 1 < end && (tail[0] | tail[1])) {
                 if (i + 1 < max_letters)
                     dest[i++] = (wchar_t) ((tail[1] << 8) | tail[0]);
                 tail += 2;
@@ -749,7 +748,8 @@ static void push_response_va(struct connection *conn, int _encrypt, va_list va)
         // the client is not reading fast enough (or is gone). dropping
         // packets would desync its cipher, so drop the client instead.
         if (!conn->overflowed)
-            warn("output buffer full for %ls, disconnecting." nl, conn->username);
+            warn("output buffer full for %ls (%zu bytes waiting), disconnecting." nl,
+                 conn->username, conn->to_send_count);
         conn->overflowed = 1;
         l2_mutex_unlock(&conn->out_lock);
         kick(conn);
@@ -1064,10 +1064,12 @@ static u32 get_character_id(struct state *state, struct character *src)
 
 static u64 distance_between(s32 x, s32 y, s32 z, s32 x2, s32 y2, s32 z2)
 {
-    s64 dx = (s64) x2 - x;
-    s64 dy = (s64) y2 - y;
-    s64 dz = (s64) z2 - z;
-    return (u64) (dx * dx + dy * dy + dz * dz);
+    // in double: garbage coordinates from a client can't overflow it.
+    double dx = (double) x2 - (double) x;
+    double dy = (double) y2 - (double) y;
+    double dz = (double) z2 - (double) z;
+    double d2 = dx * dx + dy * dy + dz * dz;
+    return d2 >= 1.8e19 ? (u64) 1.8e19 : (u64) d2;
 }
 
 static u64 distance_between_characters(struct character *a, struct character *b)

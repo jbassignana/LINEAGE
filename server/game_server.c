@@ -13,10 +13,16 @@
 #include "library.h"
 #include "net.h"
 #include "pevent.h"
+#include "thread.h"
 
 struct state {
     void *buf;
     struct library gameserver;
+    // checking the library for changes is a stat() syscall (plus dlsym).
+    // the original did it for every single network event; once per second
+    // is plenty for hot reloading.
+    uint64_t last_reload_check_ms;
+    peventf *on_pevent;
 };
 
 static struct state state = {0};
@@ -25,6 +31,10 @@ static void handle_net_event(int socket, enum net_event event, void *read, unsig
 {
     enum library_status library_status = library_failed;
     peventf *on_pevent = 0;
+    uint64_t now = l2_now_ms();
+    if (state.on_pevent && now - state.last_reload_check_ms < 1000)
+        goto dispatch;
+    state.last_reload_check_ms = now;
     /*
      * try loading the library n amount of times.
      */
@@ -79,9 +89,11 @@ static void handle_net_event(int socket, enum net_event event, void *read, unsig
         return;
     }
 
-    on_pevent = (peventf *) library_function(&state.gameserver, "on_pevent");
-    assert(on_pevent);
-    
+    state.on_pevent = (peventf *) library_function(&state.gameserver, "on_pevent");
+    assert(state.on_pevent);
+
+dispatch:
+    on_pevent = state.on_pevent;
     union ppayload payload = {0};
     payload.pevent_socket.socket = socket;
     payload.pevent_socket.read = read;

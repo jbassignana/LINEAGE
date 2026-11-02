@@ -446,14 +446,22 @@ static s32 grid_cell(s32 v)
 
 struct candidate {
     u64 d2;
+    u32 known;
     u32 id;
 };
 
+// nearest first; on ties already known objects first, then by id, so
+// the result is deterministic (a crowd standing on the same spot must
+// not reshuffle who is shown every pass).
 static int candidate_cmp(const void *a, const void *b)
 {
-    u64 x = ((const struct candidate *) a)->d2;
-    u64 y = ((const struct candidate *) b)->d2;
-    return x < y ? -1 : x > y;
+    const struct candidate *x = (const struct candidate *) a;
+    const struct candidate *y = (const struct candidate *) b;
+    if (x->d2 != y->d2)
+        return x->d2 < y->d2 ? -1 : 1;
+    if (x->known != y->known)
+        return x->known ? -1 : 1;
+    return x->id < y->id ? -1 : x->id > y->id;
 }
 
 static void visibility_for(struct visibility_ctx *ctx, struct character *self)
@@ -488,10 +496,19 @@ static void visibility_for(struct visibility_ctx *ctx, struct character *self)
                 int known = knows(self, id);
                 if (d2 > (known ? leave2 : enter2))
                     continue;
+                // when crowded, objects already on screen win ties against
+                // newcomers (they count as CFG_KNOWN_STICKY units closer).
+                // without this the nearest-N set churns as people move, and
+                // every churn is a despawn + spawn the client pays for.
+                if (known) {
+                    double d = sqrt((double) d2) - CFG_KNOWN_STICKY;
+                    d2 = d > 0 ? (u64) (d * d) : 0;
+                }
                 // never lose your target or whoever is hitting you.
                 if (id == self->target_id || id == self->last_attacker_id)
                     d2 = 0;
                 cand[n].d2 = d2;
+                cand[n].known = (u32) known;
                 cand[n].id = id;
                 n++;
             }
