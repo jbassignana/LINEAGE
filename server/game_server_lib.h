@@ -237,6 +237,9 @@ struct character {
     u64 last_regen_ms;
     // keyboard (wasd) movement state.
     int keyboard_moving;
+    u64 last_keyboard_move_ms;
+    s32 last_validate_x;
+    s32 last_validate_y;
     int keyboard_bcast_pending;
     float last_bcast_dir_x;
     float last_bcast_dir_y;

@@ -315,8 +315,94 @@ async def load(n, seconds, siege=False):
         b.w.close()
 
 
+async def wasd():
+    ok = True
+    def check(cond, msg):
+        nonlocal ok
+        print(("  PASS " if cond else "  FAIL ") + msg)
+        ok &= bool(cond)
+
+    tag = random.randint(0, 99999)
+    a = Bot("wasdmover%d" % tag)        # human fighter, run speed 120
+    o = Bot("wasdobserver%d" % tag)
+    await a.login_and_enter(); await o.login_and_enter()
+    await a.drain(0.4); await o.drain(0.4)
+    aid = a.obj_id
+
+    def moves_of(bot, oid, op=0x01):
+        return [b for (x, b) in bot.seen if x == op and struct.unpack_from("<I", b, 1)[0] == oid]
+
+    for b in (a, o):
+        b.seen = []
+        orig = b._observe
+        def obs(op, body, b=b, orig=orig):
+            b.seen.append((op, body)); orig(op, body)
+        b._observe = obs
+
+    # 1. hold W and steer the camera slowly: 40 tiny direction changes in 2s.
+    speed = 120.0
+    x, y, z = float(a.x), float(a.y), a.z
+    ang = 0.0
+    t_last = time.time()
+    for i in range(40):
+        await asyncio.sleep(0.05)
+        now = time.time(); dt = now - t_last; t_last = now
+        x += math.cos(ang) * speed * dt; y += math.sin(ang) * speed * dt
+        ang += math.radians(2)
+        a.x, a.y = int(x), int(y)
+        a.move(int(x + math.cos(ang) * 600), int(y + math.sin(ang) * 600), z, keyboard=True)
+        if i % 5 == 4:
+            a.validate(int(x), int(y), z, int(ang / 6.283 * 65536) & 0xffff)
+    await asyncio.sleep(0.3)
+    echoed = len(moves_of(a, aid))
+    relayed = len(moves_of(o, aid))
+    check(echoed >= 38, "mover gets an immediate echo for every key update (%d/40)" % echoed)
+    check(relayed <= 18, "observer gets throttled updates (%d for 40 inputs)" % relayed)
+    corrections = len(moves_of(a, aid, 0x61))
+    check(corrections == 0, "no rubber-band corrections for an honest client (%d)" % corrections)
+
+    # 2. a sharp turn reaches the observer right away.
+    before = len(moves_of(o, aid))
+    ang += math.radians(90)
+    a.move(int(x + math.cos(ang) * 600), int(y + math.sin(ang) * 600), z, keyboard=True)
+    await asyncio.sleep(0.12)
+    check(len(moves_of(o, aid)) > before, "90 degree turn relayed within 120ms")
+
+    # 3. key released: client stands still -> observer gets StopMove.
+    await asyncio.sleep(0.4)
+    x += math.cos(ang) * speed * 0.52; y += math.sin(ang) * speed * 0.52
+    a.validate(int(x), int(y), z); await asyncio.sleep(0.15)
+    a.validate(int(x), int(y), z); await asyncio.sleep(0.3)
+    stops = [b for (op, b) in o.seen if op == 0x47 and struct.unpack_from("<I", b, 1)[0] == aid]
+    check(len(stops) >= 1, "release detected, observer got StopMove")
+
+    # 4. speed hack: claim 4x run speed -> server corrects.
+    a.seen.clear()
+    for i in range(6):
+        await asyncio.sleep(0.25)
+        x += speed * 4 * 0.25
+        a.move(int(x + 600), int(y), z, keyboard=True)
+        a.validate(int(x), int(y), z)
+    await asyncio.sleep(0.3)
+    check(len(moves_of(a, aid, 0x61)) >= 1, "speed hack gets corrected (ValidateLocation to self)")
+
+    # 5. far point clamped (no walking across the map in one packet).
+    a.seen.clear()
+    a.move(a.x + 50000, a.y, a.z, keyboard=True)
+    await asyncio.sleep(0.2)
+    echo = moves_of(a, aid)
+    if echo:
+        tx, ty, _, ox, oy, _ = struct.unpack_from("<iiiiii", echo[-1], 5)
+        check(math.hypot(tx - ox, ty - oy) <= 1210, "keyboard lead clamped (%.0f)" % math.hypot(tx - ox, ty - oy))
+    else:
+        check(False, "keyboard lead clamped (no echo)")
+    return ok
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "smoke"
+    if mode == "wasd":
+        sys.exit(0 if asyncio.run(wasd()) else 1)
     if mode == "fuzz":
         sys.exit(0 if asyncio.run(fuzz()) else 1)
     if mode == "smoke":

@@ -378,6 +378,8 @@ static void handle_movement(struct state *state, struct connection *conn, byte *
     if (c->action_type == casting || c->action_type == attacking)
         c->action_type = idle;
 
+    if (keyboard)
+        c->last_keyboard_move_ms = state->now_ms;
     move_to_ex(state, c, target_x, target_y, target_z, 0, 0, 0, keyboard);
 }
 
@@ -413,8 +415,25 @@ static void handle_validate_position(struct state *state, struct connection *con
     }
 #endif
 
+    int client_still = c->last_validate_x == x && c->last_validate_y == y;
+    c->last_validate_x = x;
+    c->last_validate_y = y;
+
     if (!position_acceptable(c, x, y, z)) {
         correct_client(state, c);
+        return;
+    }
+
+    // keyboard released: the client stands still but we are walking it.
+    if (client_still && c->action_type == moving && c->action_payload.moving.keyboard &&
+        state->now_ms - c->last_keyboard_move_ms >= CFG_KEYBOARD_RELEASE_MS) {
+        c->x = x;
+        c->y = y;
+        c->z = z;
+        c->action_payload.moving.target_x = x;
+        c->action_payload.moving.target_y = y;
+        c->action_payload.moving.target_z = z;
+        stop_moving(state, c, 0);
         return;
     }
     if (c->action_type != moving)

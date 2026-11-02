@@ -84,6 +84,12 @@
 #endif
 // following a target (attack/cast approach) re-paths at most every N ms
 // or when the target moved more than DIST.
+// if the client reports (ValidatePosition) that it stood still while the
+// server thinks a key is held, the key was released: stop there. keeps
+// observers from seeing you "walk on" after you let go of W.
+#ifndef CFG_KEYBOARD_RELEASE_MS
+#define CFG_KEYBOARD_RELEASE_MS 300
+#endif
 #ifndef CFG_FOLLOW_REPATH_MS
 #define CFG_FOLLOW_REPATH_MS 400
 #endif
