@@ -1,0 +1,3 @@
+game server threads: 1 net + 1 tick + 1 sender + 1 job workers (2 cpus)
+game server listening on port 7777
+stats: players=200 ticks=100 avg_tick=1.98ms max_tick=9.00ms out=1292.0KB/s packets=42203/s

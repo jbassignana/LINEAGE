@@ -324,7 +324,7 @@ async def wasd():
 
     tag = random.randint(0, 99999)
     a = Bot("wasdmover%d" % tag)        # human fighter, run speed 120
-    o = Bot("wasdobserver%d" % tag)
+    o = Bot("wasdobs%d" % tag)
     await a.login_and_enter(); await o.login_and_enter()
     await a.drain(0.4); await o.drain(0.4)
     aid = a.obj_id
@@ -399,8 +399,70 @@ async def wasd():
     return ok
 
 
+async def mover_integration(lib_path):
+    """drive client/ue5/L2KeyboardMover.h (via tests/mover_capi.cpp) against the server."""
+    import ctypes
+    km = ctypes.CDLL(lib_path)
+    km.km_new.restype = ctypes.c_void_p
+    km.km_new.argtypes = [ctypes.c_double] * 4
+    km.km_input.argtypes = [ctypes.c_void_p] + [ctypes.c_double] * 3
+    km.km_tick.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_double, ctypes.POINTER(ctypes.c_int)]
+    km.km_server.argtypes = [ctypes.c_void_p] + [ctypes.c_double] * 3
+    ok = True
+    def check(cond, msg):
+        nonlocal ok
+        print(("  PASS " if cond else "  FAIL ") + msg)
+        ok &= bool(cond)
+
+    tag = random.randint(0, 99999)
+    a, o = Bot("kmmover%d" % tag), Bot("kmobs%d" % tag)
+    await a.login_and_enter(); await o.login_and_enter()
+    await a.drain(0.3); await o.drain(0.3)
+    m = km.km_new(120.0, a.x, a.y, a.z)
+    out = (ctypes.c_int * 16)()
+    sent = collections.Counter()
+    corrections = 0
+    t0 = time.time()
+    # 6 seconds: W 2s, W+D 1s, A 1s while turning the camera, release 1s, W 1s.
+    script = [(2.0, 1, 0, 0.0), (1.0, 1, 1, 0.0), (1.0, 0, -1, 0.6), (1.0, 0, 0, 0.6), (1.0, 1, 0, 1.2)]
+    for dur, f, r, yaw in script:
+        end = time.time() + dur
+        last = time.time()
+        while time.time() < end:
+            await asyncio.sleep(1 / 60)
+            now = time.time(); dt = now - last; last = now
+            km.km_input(m, f, r, yaw)
+            n = km.km_tick(m, (now - t0) * 1000.0, dt, out)
+            for i in range(n):
+                kind, x, y, z, tx, ty, tz, hd = out[i * 8:i * 8 + 8]
+                if kind == 0:
+                    a.x, a.y, a.z = x, y, z
+                    a.move(tx, ty, tz, keyboard=True); sent["move"] += 1
+                elif kind == 1:
+                    a.validate(x, y, z, hd); sent["validate"] += 1
+                else:
+                    a.send(b"\x36" + struct.pack("<iiii", x, y, z, hd)); sent["stop"] += 1
+            while not a.inbox.empty():
+                op, body = a.inbox.get_nowait()
+                if op == 0x61 and struct.unpack_from("<I", body, 1)[0] == a.obj_id:
+                    corrections += 1
+                    _, sx, sy, sz = struct.unpack_from("<Iiii", body, 1)
+                    km.km_server(m, sx, sy, sz)
+    await asyncio.sleep(0.3)
+    el = time.time() - t0
+    print("    client sent %s in %.1fs" % (dict(sent), el))
+    check(corrections == 0, "real mover vs server: %d corrections (rubber band)" % corrections)
+    check(sum(sent.values()) / el <= 6, "%.1f packets/s upstream" % (sum(sent.values()) / el))
+    relayed = o.packets[0x01]
+    check(relayed / el <= 7, "observer got %.1f moves/s" % (relayed / el))
+    check(o.packets[0x47] >= 1, "observer saw the stop")
+    return ok
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "smoke"
+    if mode == "mover":
+        sys.exit(0 if asyncio.run(mover_integration(sys.argv[2])) else 1)
     if mode == "wasd":
         sys.exit(0 if asyncio.run(wasd()) else 1)
     if mode == "fuzz":

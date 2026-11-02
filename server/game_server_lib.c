@@ -110,7 +110,7 @@ L2_THREAD_FN(timer_thread)
         if (took > state->stat_tick_ms_max)
             state->stat_tick_ms_max = took;
 
-        if (CFG_STATS_MS && now - last_stats >= CFG_STATS_MS) {
+        if (CFG_STATS_MS && now - last_stats >= CFG_STATS_MS && state->stat_ticks) {
             u32 players = 0;
             for (size_t i = 0; i < countof(state->characters); i++)
                 players += state->characters[i].active && state->characters[i].conn;
@@ -125,6 +125,7 @@ L2_THREAD_FN(timer_thread)
                 l2_mutex_unlock(&c->out_lock);
             }
             double secs = (double) (now - last_stats) / 1000.0;
+            if (players)
             trace("stats: players=%u ticks=%llu avg_tick=%.2fms max_tick=%.2fms out=%.1fKB/s packets=%.0f/s" nl,
                   players,
                   (unsigned long long) state->stat_ticks,

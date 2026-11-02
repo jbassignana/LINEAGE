@@ -1,3 +1,17 @@
+// letters and digits only, 1..16 characters (used in file paths).
+static int safe_name(const wchar_t *name)
+{
+    size_t n = 0;
+    for (; name[n]; n++) {
+        wchar_t ch = name[n];
+        int ok = (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') ||
+                 (ch >= L'0' && ch <= L'9') || ch == L'_';
+        if (!ok || n >= 16)
+            return 0;
+    }
+    return n > 0;
+}
+
 static void handle_send_protocol(struct state *state, struct connection *conn)
 {
     assert(state);
@@ -36,7 +50,12 @@ static void handle_auth(struct state *state, struct connection *conn, byte *req)
            "%u", &conn->login_ok1,
            "%u", &conn->login_ok2);
 
-    trace("username is %S" nl, conn->username);
+    ptrace("username is %ls" nl, conn->username);
+    if (!safe_name(conn->username)) {
+        warn("rejected unsafe account name." nl);
+        kick(conn);
+        return;
+    }
 
     char access_path[512] = {0};
     snprintf(access_path, 
@@ -126,6 +145,17 @@ static void handle_character_creation(struct state *state, struct connection *co
            "%u", &hair_color_id,
            "%u", &face_id);
     
+    // names end up in file paths: "../../whatever" let a client write
+    // files anywhere the server can.
+    if (!safe_name(name)) {
+        warn("rejected character name from %ls." nl, conn->username);
+        push_response(conn, 1,
+                      "%h", 0,
+                      "%c", 0x1a,   // CharCreateFail
+                      "%u", 0x04);  // reason: incorrect name
+        return;
+    }
+
     // TODO(fmontenegro): check if name exists
     
     char characters_path[512] = {0};
@@ -949,8 +979,12 @@ static void handle_leave_world(struct state *state, struct connection *conn)
 {
     assert(state);
     assert(conn);
-    if (conn->character)
+    if (conn->character) {
         character_leave_world(state, conn->character);
+        // the slot can be reused by an npc: never keep pointing at it.
+        conn->character->conn = 0;
+        conn->character = 0;
+    }
     push_response(conn, 1,
                   "%h", 0,
                   "%c", 0x7e);
@@ -961,6 +995,7 @@ static void handle_restart(struct state *state, struct connection *conn)
     assert(state);
     assert(conn);
     character_leave_world(state, conn->character);
+    conn->character->conn = 0;
     conn->character = 0;
     push_response(conn, 1,
                   "%h", 0,
