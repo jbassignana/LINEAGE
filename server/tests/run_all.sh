@@ -5,7 +5,7 @@ set -e
 cd "$(dirname "$0")/.."
 mode=${1:-test}
 bash build.sh "$mode" > /dev/null 2>&1
-g++ -std=c++17 -O2 -Wall -Wextra client/ue5/test_keyboard_mover.cpp -o bin/test_keyboard_mover
+g++ -std=c++17 -O2 -Wall -Wextra ../client/ue5/test_keyboard_mover.cpp -o bin/test_keyboard_mover
 g++ -std=c++17 -O2 -shared -fPIC tests/mover_capi.cpp -o bin/libkm.so
 
 echo "== keyboard mover (c++ unit)"; ./bin/test_keyboard_mover

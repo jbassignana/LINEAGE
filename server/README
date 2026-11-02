@@ -69,7 +69,7 @@ wasd / keyboard movement
 - server: echo to the mover immediately, throttle for observers, clamp the
   lead point, trust the client within CFG_DESYNC_TOLERANCE (no rubber
   band), correct beyond it (no speed/teleport hacks), detect key release.
-- client/ue5/L2KeyboardMover.h: prediction + minimal packets + blended
+- ../client/ue5/L2KeyboardMover.h: prediction + minimal packets + blended
   corrections for a custom ue5 client (example component included).
 
 fixes

@@ -1,6 +1,6 @@
 // tiny C wrapper so tests/l2bot.py can drive the real KeyboardMover
 // against the real server (integration test).
-#include "../client/ue5/L2KeyboardMover.h"
+#include "../../client/ue5/L2KeyboardMover.h"
 extern "C" {
 void *km_new(double speed, double x, double y, double z) {
     auto *m = new l2::KeyboardMover();
