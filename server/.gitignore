@@ -2,4 +2,8 @@
 *.exp
 *.pdb
 *.ilk
-bin/data/*
+bin/data/*bin/data/
+bin/*.so
+bin/game_server
+bin/login_server
+__pycache__/

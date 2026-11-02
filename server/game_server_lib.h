@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdlib.h> // calloc, size_t
+#include <stddef.h> // offsetof
 #include <stdio.h>  // fprintf
 #include <string.h> // memset, memcpy, strncpy, strnlen
 #include <stdint.h> // fixed int types
@@ -9,19 +10,10 @@
 #include <stdarg.h> // va_arg, va_list
 #include <math.h>   // sqrtf
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#endif
-
-#ifdef __linux__
-#include <pthread.h> // pthread_create
-#include <unistd.h>  // sleep
-#endif
-
+#include "thread.h"
+#include "config.h"
 #include "directory.h"
 #include "net.h"
-#include "wqueue.h"
 #include "pevent.h"
 
 typedef uint8_t byte;
@@ -43,6 +35,11 @@ typedef float seconds;
 #define mb *1024*1024
 #define sqr(x) ((x)*(x))
 #define trace(...) fprintf(stderr, __VA_ARGS__)
+#if CFG_TRACE_PACKETS
+#define ptrace(...) trace(__VA_ARGS__)
+#else
+#define ptrace(...) ((void) 0)
+#endif
 #define warn(...)  trace("warning / " __VA_ARGS__)
 #define error(...) trace("  error / " __VA_ARGS__)
 #define countof(x) (sizeof(x) / sizeof(*(x)))
@@ -91,6 +88,10 @@ struct coroutine {
 };
 
 struct connection {
+    // locks first: conn_reset() zeroes everything after them.
+    l2_mutex out_lock;
+    l2_mutex io_lock;
+
     int socket;
     int encrypted;
     
@@ -106,14 +107,30 @@ struct connection {
     byte decrypt_key[8];
     
     struct coroutine state;
-    
-    byte to_send[8 kb];
+
+    /*
+     * output path (multithreaded):
+     * game logic encrypts packets and appends them to `to_send`
+     * holding `out_lock` (short critical section). a sender thread
+     * swaps them into `inflight` and writes them to the socket
+     * holding only `io_lock`, so a slow client never blocks the world.
+     */
+    byte to_send[CFG_OUTBOX_BYTES];
     size_t to_send_count;
+    int overflowed;
+    int queued;
+    u64 stat_bytes;
+    u64 stat_packets;          // already in its sender's ready list.
+
+    u64 retry_at_ms;     // socket buffer was full, retry later.
+    int io_socket;       // socket as seen by the sender (0 = closed).
+    byte inflight[CFG_OUTBOX_BYTES];
+    size_t inflight_count;
     size_t sent;
-    
-    byte request[8 kb];
+
+    byte request[16 kb];
     size_t request_count;
-    
+
     struct character *character;
 };
 
@@ -203,25 +220,47 @@ struct character {
     u32 name_color;
     
     u32 target_id;
-    
+
+    // set when the player sent EnterWorld (npcs: when spawned).
+    int in_world;
+    // interest management: objects this client has been told about.
+    u64 known[1024 / 64];
+    u32 known_count;
+    // ms timestamps.
+    u64 last_client_update_ms;
+    u64 last_correction_ms;
+    u64 last_others_move_bcast_ms;
+    u64 stunned_until_ms;
+    u64 disoriented_until_ms;  // shadow step: can't turn/attack.
+    u64 dead_since_ms;
+    u64 skill_reuse_until_ms[32];
+    u64 last_regen_ms;
+    // keyboard (wasd) movement state.
+    int keyboard_moving;
+    int keyboard_bcast_pending;
+    float last_bcast_dir_x;
+    float last_bcast_dir_y;
+    // last attacker (kept visible even over the visibility cap).
+    u32 last_attacker_id;
+
     enum action_type {
         idle,
         moving,
         attacking,
         dead,
+        casting,
     } action_type, prev_action_type;
     
     union action_payload {
         struct action_moving {
             int queue_action;
             u32 offset;
-            
-            u64 ticks_to_move;
-            u64 move_start_time;
-            u64 move_timestamp;
-            
-            float x_speed_ticks;
-            float y_speed_ticks;
+            int keyboard;
+
+            // time based interpolation (ms), independent of tick rate.
+            u64 start_ms;
+            u64 duration_ms;
+            u64 last_repath_ms;
             
             s32 src_x;
             s32 src_y;
@@ -236,8 +275,14 @@ struct character {
         
         struct action_attacking {
             u32 obj_id;
-            struct coroutine state;
+            u64 next_hit_ms;
         } attacking;
+
+        struct action_casting {
+            u32 skill_index;
+            u32 target_id;
+            u64 hit_at_ms;
+        } casting;
     } action_payload, prev_action_payload;
 };
 
@@ -272,23 +317,55 @@ enum attr_status {
     attr_status_max_cp = 0x22,
 };
 
+struct jobs {
+    l2_mutex lock;
+    l2_cond start;
+    l2_cond done;
+    l2_thread threads[CFG_MAX_JOB_THREADS];
+    int count;
+    u64 generation;
+    int pending;
+    int stop;
+    void (*fn)(void *ctx, size_t from, size_t to);
+    void *ctx;
+    size_t n;
+};
+
+struct sender {
+    struct state *state;
+    l2_thread thread;
+    l2_mutex lock;
+    l2_cond wake;
+    u32 ready[1024];      // ring of connection indexes.
+    u32 head;
+    u32 count;
+    int stop;
+};
+
 struct state {
-    float d;
+    float d;              // ms elapsed in the current tick.
     double run_time;
-    u64 ticks;
-    struct wqueue send_responses_worker;
+    u64 ticks;            // 100ms units (kept for compatibility).
+    u64 now_ms;           // monotonic server time.
+    u64 last_visibility_ms;
+    u32 rng;
+
     struct connection connections[1024];
     struct character characters[1024];
 
-#ifdef _WIN32
-    HANDLE timer;
-    HANDLE lock;
-#endif
+    // world lock: every mutation of characters/connections game state.
+    l2_mutex lock;
+    l2_thread timer;
+    int stop_timer;
 
-#ifdef __linux__
-    pthread_t timer;
-    pthread_mutex_t lock;
-#endif
+    struct sender senders[CFG_MAX_SENDERS];
+    int sender_count;
+    struct jobs jobs;
+
+    // stats (printed every 10s).
+    u64 stat_ticks;
+    double stat_tick_ms_total;
+    double stat_tick_ms_max;
 };
 
 static int on_init(void **buf);
@@ -298,11 +375,8 @@ static void on_connection(void **buf, int socket);
 static void on_request(void **buf, int socket, void *request, size_t len);
 static void on_disconnect(void **buf, int socket);
 
-static void send_responses(struct wqueue *q, void *w);
 static void character_update(struct state *state, struct character *character);
 
-static void lock(struct state *state);
-static void unlock(struct state *state);
 
 static byte *bscanf_va(byte *src, size_t n, va_list va);
 static byte *bscanf_(byte *src, size_t n, ...);
@@ -356,6 +430,41 @@ static u32 get_character_id(struct state *state, struct character *src);
 
 static void moving_update(struct state *state, struct character *character);
 static void attacking_update(struct state *state, struct character *character);
+static void casting_update(struct state *state, struct character *character);
 
-static u32 distance_between(s32 x, s32 y, s32 z, s32 x2, s32 y2, s32 z2);
-static u32 distance_between_characters(struct character *a, struct character *b);
+// threads & output
+static void stop_threads(struct state *state);
+static void conn_flush(struct state *state, struct connection *conn);
+static void flush_all(struct state *state);
+static void kick(struct connection *conn);
+static void jobs_parallel_for(struct jobs *jobs, size_t n, void (*fn)(void *, size_t, size_t), void *ctx);
+
+// world
+static void character_init_stats(struct state *state, struct character *c);
+static void character_leave_world(struct state *state, struct character *c);
+static void update_visibility(struct state *state);
+static void update_visibility_for(struct state *state, struct character *c);
+static int  knows(struct character *observer, u32 id);
+static void send_object_info(struct state *state, struct character *to, struct character *src);
+static void broadcast_others_(struct state *state, struct character *src, int _encrypt, ...);
+#define broadcast_others(state, character, _encrypt, ...) \
+    broadcast_others_((state), (character), (_encrypt), __VA_ARGS__, 0)
+static struct character *spawn_npc(struct state *state, s32 x, s32 y, s32 z);
+static s32 heading_from(s32 dx, s32 dy);
+static void stop_moving(struct state *state, struct character *c, int notify_self);
+static void world_character_tick(struct state *state, struct character *c);
+static void keyboard_broadcast_move(struct state *state, struct character *c);
+static void update_position(struct state *state, struct character *c);
+static void send_validate_location(struct state *state, struct connection *to, struct character *c);
+static void die(struct state *state, struct character *src);
+
+// skills
+static void send_skill_list(struct state *state, struct character *c);
+static void handle_magic_skill_use(struct state *state, struct connection *conn, byte *req);
+static void handle_attack_request(struct state *state, struct connection *conn, byte *req);
+static void handle_cannot_move_anymore(struct state *state, struct connection *conn, byte *req);
+static void action_failed(struct character *c);
+
+// squared distances. u64: l2 coordinates are large enough to overflow u32.
+static u64 distance_between(s32 x, s32 y, s32 z, s32 x2, s32 y2, s32 z2);
+static u64 distance_between_characters(struct character *a, struct character *b);

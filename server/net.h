@@ -23,3 +23,7 @@ void net_listen(int server, net_handler *handler);
 unsigned long long net_send(int socket, void *buf, unsigned long long n);
 // close the socket.
 void net_close(int socket);
+// ask the os to terminate the connection without releasing the socket.
+// the listen loop will notice and fire net_closed, then close it. this is
+// the thread safe way to drop a client from any thread.
+void net_shutdown(int socket);

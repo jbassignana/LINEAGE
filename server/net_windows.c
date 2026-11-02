@@ -1,4 +1,6 @@
 #include <stdio.h> // printf
+// winsock's select() handles only 64 sockets unless told otherwise.
+#define FD_SETSIZE 1024
 #include <winsock2.h>
 #include "net.h"
 
@@ -51,7 +53,7 @@ int net_sock(char *path)
 
 void net_listen(int server, net_handler *handler)
 {
-    #define max_clients 128
+    #define max_clients 1000
     static SOCKET clients[max_clients];
     static unsigned char read_buf[8192] = {0};
 
@@ -84,6 +86,10 @@ void net_listen(int server, net_handler *handler)
                 if (clients[i] > highest)
                     highest = clients[i];
             } else {
+                // broken socket: tell the game server before dropping it,
+                // otherwise its connection slot leaks forever.
+                handler((int) clients[i], net_closed, 0, 0);
+                closesocket(clients[i]);
                 clients[i] = INVALID_SOCKET;
             }
         }
@@ -110,6 +116,8 @@ void net_listen(int server, net_handler *handler)
                             break;
                         }
                         
+                        int nodelay = 1;
+                        setsockopt(new_client, IPPROTO_TCP, TCP_NODELAY, (char *) &nodelay, sizeof(nodelay));
                         clients[i] = new_client;
                         handler((int) new_client, net_conn, 0, 0);
                         accepted = 1;
@@ -139,10 +147,11 @@ void net_listen(int server, net_handler *handler)
                         }
                         break;
                     } else if (bytes_read == 0) {
-                        // connection closed by client.
+                        // connection closed by client. notify first (the
+                        // handler still needs the socket id), close after.
+                        handler((int) clients[i], net_closed, 0, 0);
                         closesocket(clients[i]);
                         clients[i] = INVALID_SOCKET;
-                        handler((int) clients[i], net_closed, 0, 0);
                         break;
                     } else {
                         // read.
@@ -169,6 +178,11 @@ unsigned long long net_send(int socket, void *buf, unsigned long long n)
         sent += tmp;
     }
     return sent;
+}
+
+void net_shutdown(int socket)
+{
+    shutdown((SOCKET) socket, SD_BOTH);
 }
 
 void net_close(int socket)

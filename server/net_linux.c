@@ -9,6 +9,7 @@
 #include <sys/socket.h> // socket, bind, listen, send
 #include <sys/un.h>     // sockaddr_un
 #include <netinet/in.h> // sockaddr_in, INADDR_ANY, htons
+#include <netinet/tcp.h> // TCP_NODELAY
 #include <unistd.h>     // unlink, close
 #include "net.h"
 
@@ -110,10 +111,6 @@ void net_listen(int server, net_handler *handler)
             goto abort;
         
         for (int i = 0; i < ev_count; i += 1) {
-            // only read and write, ignore the rest.
-            if (!(events[i].events & EPOLLIN) &&
-                !(events[i].events & EPOLLOUT))
-                continue;
             
             // server
             if (events[i].data.fd == server) {
@@ -125,8 +122,12 @@ void net_listen(int server, net_handler *handler)
                         print_err("failed to accept new client in loop");
                         break;
                     }
+                    // the game server batches its packets per tick,
+                    // nagle would only add 40-200ms of extra latency.
+                    int nodelay = 1;
+                    setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
                     event.data.fd = client;
-                    event.events = EPOLLIN | EPOLLET;
+                    event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
                     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client, &event) == -1) {
                         print_err("failed to add new client to epoll");
                         close(client);
@@ -138,22 +139,30 @@ void net_listen(int server, net_handler *handler)
             }
             
             // clients.
+            int fd = events[i].data.fd;
+            int closed = 0;
             if (events[i].events & EPOLLIN) {
                 while (1) {
-                    ssize_t received = recv(events[i].data.fd, read_buf, sizeof(read_buf), 0);
+                    ssize_t received = recv(fd, read_buf, sizeof(read_buf), 0);
                     if (received == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
                         break;
-                    if (received == -1) {
-                        print_err("failed while reading");
+                    if (received == -1 && errno == EINTR)
+                        continue;
+                    if (received <= 0) {
+                        closed = 1;
                         break;
                     }
-                    if (received == 0) {
-                        handler(events[i].data.fd, net_closed, 0, 0);
-                        epoll_ctl(epoll_fd, EPOLL_CTL_DEL, events[i].data.fd, &event);
-                        break;
-                    }
-                    handler(events[i].data.fd, net_read, read_buf, (size_t) received);
+                    handler(fd, net_read, read_buf, (size_t) received);
                 }
+            }
+            if (events[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP))
+                closed = 1;
+            if (closed) {
+                // notify first, close after: the handler makes sure no
+                // other thread uses this socket anymore before returning.
+                epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, &event);
+                handler(fd, net_closed, 0, 0);
+                close(fd);
             }
         }
     }
@@ -170,7 +179,7 @@ unsigned long long net_send(int socket, void *buf, unsigned long long n)
     if (!buf)
         return 0;
     while (sent < n) {
-        long long tmp = send(socket, buf + sent, n - sent, 0);
+        long long tmp = send(socket, (char *) buf + sent, n - sent, MSG_NOSIGNAL);
         if (tmp == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
             break;
         if (tmp == -1) {
@@ -185,4 +194,9 @@ unsigned long long net_send(int socket, void *buf, unsigned long long n)
 void net_close(int socket)
 {
     close(socket);
+}
+
+void net_shutdown(int socket)
+{
+    shutdown(socket, SHUT_RDWR);
 }
