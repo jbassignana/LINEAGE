@@ -2,8 +2,11 @@
 *.exp
 *.pdb
 *.ilk
-bin/data/*bin/data/
-bin/*.so
-bin/game_server
-bin/login_server
+bin/data/*
+.vscode
+*.pdb
+bin/data/
+bin/*.log
+bin/test_keyboard_mover
+bin/libkm.so
 __pycache__/
